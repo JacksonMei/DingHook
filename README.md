@@ -5,7 +5,9 @@
 
 A simple DingTalk chatbot service that integrates with Google Gemini (via the official `google-genai` SDK) for conversational replies, keeps lightweight local memory (JSONL), and periodically extracts facts to generate personalized push messages.
 
-![Architecture](/assets/architecture.svg)
+![Hero](assets/hero.png)
+
+![Architecture](assets/architecture.png)
 
 ## Key features
 
@@ -23,20 +25,16 @@ A simple DingTalk chatbot service that integrates with Google Gemini (via the of
 pip install -r dingbot/requirements.txt
 ```
 
-2. Export required environment variables (do not hard-code credentials in repo):
+2. Start the server with a single-line example (set PORT and env in one line):
 
 ```bash
-export ACCESS_TOKEN=your_dingtalk_access_token
-export SECRET=your_dingtalk_secret
-export GEMINI_API_KEY=your_google_genai_api_key
-export GEMINI_MODEL=models/gemini-3-pro-preview
+PORT=8090 GEMINI_API_KEY=your_key_here ACCESS_TOKEN=your_dingtalk_access_token SECRET='your secret with spaces' \
+  python -u -m dingbot.server
 ```
 
-3. Start the server:
-
-```bash
-python -m dingbot.server
-```
+Notes:
+- Use `-u` to disable Python buffering for real-time logs.
+- Keep secrets out of your repo; prefer using environment variable management in CI or a secrets manager.
 
 4. Health check:
 
