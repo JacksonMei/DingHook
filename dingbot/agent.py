@@ -31,7 +31,7 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-def _call_model(prompt: str, timeout: int = 8) -> str:
+def _call_model(prompt: str, timeout: int = None) -> str:
     """Call LLM model using OpenAI client with a timeout.
 
     Supports:
@@ -44,9 +44,14 @@ def _call_model(prompt: str, timeout: int = 8) -> str:
     - OPENAI_API_KEY: API key
     - OPENAI_API_BASE: API base URL (default: https://api.openai.com/v1)
     - OPENAI_MODEL: Model name (default: gpt-4-turbo)
+    - OPENAI_REQUEST_TIMEOUT: Request timeout in seconds (default: 30)
 
     For local development, set `FORCE_MOCK_OPENAI=1` to force mock responses.
     """
+    # Use config timeout if not specified
+    if timeout is None:
+        timeout = config.OPENAI_REQUEST_TIMEOUT
+    
     # Development/testing shortcut: force a fast mock reply
     if os.getenv("FORCE_MOCK_OPENAI") or os.getenv("FORCE_MOCK_GENAI"):
         logger.info("Agent: Mock mode enabled, returning mock response")
@@ -73,7 +78,8 @@ def _call_model(prompt: str, timeout: int = 8) -> str:
         try:
             client = OpenAI(
                 api_key=config.OPENAI_API_KEY,
-                base_url=config.OPENAI_API_BASE
+                base_url=config.OPENAI_API_BASE,
+                timeout=timeout
             )
             
             response = client.chat.completions.create(
@@ -82,8 +88,7 @@ def _call_model(prompt: str, timeout: int = 8) -> str:
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.7,
-                max_tokens=1024,
-                timeout=timeout
+                max_tokens=1024
             )
             
             # Extract response text

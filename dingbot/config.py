@@ -7,6 +7,7 @@ SECRET = os.getenv("SECRET")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_API_BASE = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4-turbo")
+OPENAI_REQUEST_TIMEOUT = int(os.getenv("OPENAI_REQUEST_TIMEOUT", "30"))  # 增加默认超时到 30 秒
 
 # Legacy Gemini config for backward compatibility (deprecated)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
