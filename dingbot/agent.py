@@ -1,228 +1,128 @@
-"""Agent adapter to call Gemini-like model using API Key, with a simple fallback.
+"""Agent adapter to call LLM models using OpenAI client.
 
-The adapter expects two environment variables when using a real model:
-- GEMINI_API_KEY
-- GEMINI_API_URL
+Unified LLM provider using OpenAI API (compatible with OpenAI and OpenAI-compatible endpoints)
+Environment variables:
+- OPENAI_API_KEY: API key for authentication
+- OPENAI_API_BASE: API base URL (default: https://api.openai.com/v1)
+- OPENAI_MODEL: Model name (default: gpt-4-turbo)
 
-It will send a JSON payload {"model": <name>, "input": <prompt>} and expect a plain text response.
+Supports OpenAI, Azure OpenAI, Ollama, and other compatible endpoints.
 """
 
 import json
-import requests
 from typing import List, Dict, Any, Optional
 
 from . import config
+from .memory_file import get_user_memories
+from .mem0_manager import get_mem0_manager
 
 import logging
 import time
 import concurrent.futures
 import os
 
-# Prefer the new official GenAI client if available: `from google import genai` and `from google.genai import types`
+# Try to import OpenAI client
 try:
-    from google import genai  # type: ignore
-    from google.genai import types  # type: ignore
-    GENAI_CLIENT_AVAILABLE = True
-except Exception:
-    genai = None  # type: ignore
-    types = None  # type: ignore
-    GENAI_CLIENT_AVAILABLE = False
-
-# Backwards-compatible alias for older test code
-GENAI_AVAILABLE = GENAI_CLIENT_AVAILABLE
+    from openai import OpenAI
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
 
 def _call_model(prompt: str, timeout: int = 8) -> str:
-    """Call Gemini model using the official Google client with a timeout and clear logging.
+    """Call LLM model using OpenAI client with a timeout.
 
-    The function will try, in order:
-    - Official `google.generativeai` client (if installed and API key present)
-    - A configured `GEMINI_API_URL` HTTP endpoint
-    - A local heuristic fallback
+    Supports:
+    - OpenAI API (https://api.openai.com/v1)
+    - Azure OpenAI
+    - Ollama (http://localhost:11434/v1)
+    - Other OpenAI-compatible endpoints
 
-    Calls to remote services are executed in a worker thread and will be aborted after `timeout` seconds,
-    returning the local fallback to keep the bot responsive.
+    Configuration via environment variables:
+    - OPENAI_API_KEY: API key
+    - OPENAI_API_BASE: API base URL (default: https://api.openai.com/v1)
+    - OPENAI_MODEL: Model name (default: gpt-4-turbo)
 
-    For local development you can set `FORCE_MOCK_GENAI=1` in the environment to force a fast mock reply.
+    For local development, set `FORCE_MOCK_OPENAI=1` to force mock responses.
     """
     # Development/testing shortcut: force a fast mock reply
-    if os.getenv("FORCE_MOCK_GENAI"):
-        logger.info("Agent: FORCE_MOCK_GENAI enabled, returning mock response")
+    if os.getenv("FORCE_MOCK_OPENAI") or os.getenv("FORCE_MOCK_GENAI"):
+        logger.info("Agent: Mock mode enabled, returning mock response")
         return json.dumps({"reply": "(mock) 我已看到你的消息并已记录。", "save_memory": {"interval": 3600, "content": "mock memory"}})
 
-    # If an API key is present but the official SDK is not installed, return a clear JSON reply
-    if config.GEMINI_API_KEY and not GENAI_CLIENT_AVAILABLE:
-        logger.warning("Gemini API key present but official SDK not available; REST calls are disabled by policy."
-                       " Please install 'google-genai' to enable Gemini.")
+    # Validate API key
+    if not config.OPENAI_API_KEY:
+        logger.error("Agent: OPENAI_API_KEY not configured")
         return json.dumps({
-            "reply": "抱歉，机器人未启用 Gemini SDK（缺少 'google-genai'）。管理员请安装并重启服务。",
+            "reply": "抱歉，LLM 服务未启用。请配置 OPENAI_API_KEY 环境变量。",
+        })
+
+    # Check if OpenAI is available
+    if not OPENAI_AVAILABLE:
+        logger.error("Agent: openai package not installed. Install via: pip install openai")
+        return json.dumps({
+            "reply": "抱歉，LLM 客户端未安装。请安装 openai 包。",
         })
 
     start = time.perf_counter()
 
-    def _resolve_model_name(preferred: Optional[str]) -> Optional[str]:
-        """Resolve a user-provided model name to an available model via the SDK.
-
-        If the SDK is available and an API key is present, this will list models and
-        attempt to find the best match. It prefers exact matches, then substring
-        matches (e.g., 'gemini-3' -> 'models/gemini-3-pro-preview'), then sensible
-        fallbacks like gemini-2.5 models.
-        """
-        if not (GENAI_CLIENT_AVAILABLE and config.GEMINI_API_KEY):
-            return preferred
+    def _call_openai():
+        """Call OpenAI-compatible API."""
         try:
-            client = genai.Client()
-            names = [getattr(m, "name", None) for m in client.models.list()]
-            names = [n for n in names if n]
-            if not names:
-                return preferred
-
-            # If preferred already looks like a full model resource or exact match, return it
-            if not preferred:
-                # pick a reasonable default: prefer gemini-3, then gemini-2.5, then first
-                for n in names:
-                    if "gemini-3" in n:
-                        return n
-                for n in names:
-                    if "gemini-2.5" in n:
-                        return n
-                return names[0]
-
-            if preferred in names or preferred.startswith("models/") or "/" in preferred:
-                return preferred
-
-            # substring / suffix match
-            for n in names:
-                if preferred in n:
-                    return n
-            bare = preferred.split('/')[-1]
-            for n in names:
-                if bare in n:
-                    return n
-            # fallback to first gemini-3 or first model
-            for n in names:
-                if "gemini-3" in n:
-                    return n
-            return names[0]
-        except Exception:
-            logger.exception("Agent: model resolution via list failed")
-            return preferred
-
-    def _call_official():
-        # Use the official google.genai client if available
-        # This follows the pattern:
-        #   from google import genai
-        #   from google.genai import types
-        #   client = genai.Client()
-        #   resp = client.models.generate_content(...)
-        client = genai.Client()
-        raw_model = config.GEMINI_MODEL or "gemini-3"
-        model = _resolve_model_name(raw_model) or raw_model
-
-        def _call_with_model(m: str):
-            if types is not None:
-                cfg = types.GenerateContentConfig(
-                    thinking_config=types.ThinkingConfig(thinking_level="low")
-                )
-                return client.models.generate_content(model=m, contents=prompt, config=cfg)
+            client = OpenAI(
+                api_key=config.OPENAI_API_KEY,
+                base_url=config.OPENAI_API_BASE
+            )
+            
+            response = client.chat.completions.create(
+                model=config.OPENAI_MODEL,
+                messages=[
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.7,
+                max_tokens=1024,
+                timeout=timeout
+            )
+            
+            # Extract response text
+            if response.choices and len(response.choices) > 0:
+                return response.choices[0].message.content
             else:
-                return client.models.generate_content(model=m, contents=prompt)
-
-        try:
-            resp = _call_with_model(model)
+                logger.warning("Agent: No choices in OpenAI response")
+                return None
+                
         except Exception as e:
-            # If the error suggests the model is not found, try to resolve with the SDK list
-            msg = str(e).lower()
-            if "not found" in msg or "is not found" in msg or "not supported" in msg:
-                logger.warning("Agent: model '%s' not found, attempting to resolve a compatible model", model)
-                fallback = _resolve_model_name(raw_model)
-                if fallback and fallback != model:
-                    logger.info("Agent: retrying with resolved model %s", fallback)
-                    try:
-                        resp = _call_with_model(fallback)
-                    except Exception:
-                        # re-raise original for outer handler
-                        raise
-                else:
-                    raise
-            else:
-                # Re-raise so outer _call_model will handle logging and fallback
-                raise
+            logger.exception(f"Agent: OpenAI API call failed: {e}")
+            raise
 
-        # Many client responses expose `.text` or `.output`; try common accessors
-        # Return `.text` even if it's empty so the caller can handle empty replies explicitly
-        if hasattr(resp, "text"):
-            return resp.text
-        if hasattr(resp, "output") and resp.output:
-            first = resp.output[0]
-            if hasattr(first, "content") and isinstance(first.content, str):
-                return first.content
-        # Fallback to stringifying the response
-        return str(resp)
+    # Execute the call with timeout protection
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_call_openai)
+            try:
+                response_text = future.result(timeout=timeout)
+            except concurrent.futures.TimeoutError:
+                logger.warning(f"Agent: OpenAI request timeout after {timeout} seconds")
+                raise TimeoutError(f"Request timeout after {timeout}s")
+        
+        elapsed = time.perf_counter() - start
+        logger.info(f"Agent: OpenAI responded in {elapsed:.2f}s")
+        
+        if response_text:
+            return response_text
+        else:
+            logger.warning("Agent: OpenAI returned empty response")
+            return json.dumps({"reply": "抱歉，未能生成回复。"})
+            
+    except TimeoutError:
+        logger.warning("Agent: Request timeout")
+        return json.dumps({"reply": "抱歉，请求超时。请稍候重试。"})
+    except Exception as e:
+        logger.exception(f"Agent: Failed to call LLM: {e}")
+        return json.dumps({"reply": "抱歉，调用 LLM 失败。"})
 
-    def _http_fallback():
-        payload = {"model": config.GEMINI_MODEL, "input": prompt}
-        headers = {"Authorization": f"Bearer {config.GEMINI_API_KEY}", "Content-Type": "application/json"}
-        resp = requests.post(config.GEMINI_API_URL, json=payload, headers=headers, timeout=timeout)
-        resp.raise_for_status()
-        return resp.text
-
-    # Try older genai.generate_text API (backwards compatibility)
-    if getattr(genai, "generate_text", None):
-        logger.info("Agent: calling older genai.generate_text API")
-        try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-                fut = ex.submit(lambda: genai.generate_text(model=config.GEMINI_MODEL or "models/gemini-3", prompt=prompt))
-                try:
-                    resp = fut.result(timeout=timeout)
-                except concurrent.futures.TimeoutError:
-                    logger.warning("legacy genai.generate_text timeout after %s seconds", timeout)
-                    raise
-            # extract text
-            if hasattr(resp, "text") and resp.text:
-                resp_text = resp.text
-            elif isinstance(resp, dict):
-                cands = resp.get("candidates") or []
-                resp_text = (cands[0].get("content") if cands else json.dumps(resp))
-            else:
-                resp_text = str(resp)
-            elapsed = time.perf_counter() - start
-            logger.info("Agent: legacy genai returned in %.2fs", elapsed)
-            return resp_text
-        except Exception as e:
-            logger.exception("Agent: legacy genai call failed: %s", e)
-            # fall through to newer client / rest / fallback
-
-    # Try modern google.genai client if available
-    if GENAI_CLIENT_AVAILABLE and config.GEMINI_API_KEY:
-        logger.info("Agent: calling google.genai client for model %s", config.GEMINI_MODEL)
-        try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-                fut = ex.submit(_call_official)
-                try:
-                    resp = fut.result(timeout=timeout)
-                except concurrent.futures.TimeoutError:
-                    logger.warning("Gemini client timeout after %s seconds", timeout)
-                    raise
-            # resp is expected to be a string already from _call_official
-            resp_text = resp if isinstance(resp, str) else str(resp)
-            elapsed = time.perf_counter() - start
-            logger.info("Agent: google.genai client returned in %.2fs", elapsed)
-            return resp_text
-        except Exception as e:
-            logger.exception("Agent: google.genai client call failed: %s", e)
-            # fall through to REST or local fallback
-
-    # NOTE: per project policy, we do NOT use the REST Generative Language API here.
-    # The agent will use the official `google.genai` SDK client when available. If it is
-    # not installed or an SDK call fails, we fall back to a local heuristic only (no REST).
-    if config.GEMINI_API_KEY and not GENAI_CLIENT_AVAILABLE:
-        logger.warning("Gemini API key present but official SDK not available; REST calls are disabled by policy. Install 'google-genai' to enable SDK usage.")
-
-from .memory_file import get_user_memories
-from .mem0_manager import get_mem0_manager
 
 def analyze_and_reply(content: str, sender_name: str, user_id: str = None) -> Dict[str, Any]:
     """Return a dict with keys: reply (str), optional save_memory dict {interval, content}.
