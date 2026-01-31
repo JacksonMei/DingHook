@@ -222,23 +222,65 @@ def _call_model(prompt: str, timeout: int = 8) -> str:
         logger.warning("Gemini API key present but official SDK not available; REST calls are disabled by policy. Install 'google-genai' to enable SDK usage.")
 
 from .memory_file import get_user_memories
+from .mem0_manager import get_mem0_manager
 
 def analyze_and_reply(content: str, sender_name: str, user_id: str = None) -> Dict[str, Any]:
     """Return a dict with keys: reply (str), optional save_memory dict {interval, content}.
 
-    每次对话都带上用户 memory 作为上下文。
+    流程:
+    1. 调用 Mem0 add() 存入当前对话
+    2. 调用 Mem0 search() 获取相关记忆
+    3. 拼接 Prompt 喂给 LLM
+    4. 返回回复
     """
-    prompt_parts = [f"你是一个贴心的助手。请简洁回复用户 '{sender_name}'。\n用户消息:\n{content}"]
-    # 加载用户历史 memory
-    memories = get_user_memories(user_id, limit=10) if user_id else []
+    if not user_id:
+        user_id = sender_name
+    
+    # 1. 将当前消息加入 Mem0 记忆
+    mem0_mgr = get_mem0_manager()
+    if mem0_mgr:
+        try:
+            messages = [
+                {"role": "user", "content": content}
+            ]
+            mem0_mgr.add_memory(messages, user_id)
+            logger.info(f"Added message to Mem0 for user {user_id}")
+        except Exception as e:
+            logger.warning(f"Failed to add memory to Mem0: {e}")
+    
+    # 2. 从 Mem0 search() 获取相关记忆
+    relevant_memories = []
+    if mem0_mgr:
+        try:
+            relevant_memories = mem0_mgr.search_memories(content, user_id, limit=5)
+            logger.info(f"Found {len(relevant_memories)} relevant memories for user {user_id}")
+        except Exception as e:
+            logger.warning(f"Failed to search memories from Mem0: {e}")
+    
+    # 3. 拼接 Prompt
+    prompt_parts = [f"你是一个贴心且记忆力超群的助手。请简洁、自然地回复用户 '{sender_name}'。"]
+    
+    # 添加 Mem0 的相关记忆
+    if relevant_memories:
+        memories_text = mem0_mgr.format_memories_as_context(relevant_memories) if mem0_mgr else ""
+        if memories_text:
+            prompt_parts.append(f"关于用户的相关信息（基于历史对话）：\n{memories_text}")
+    
+    # 添加用户当前消息
+    prompt_parts.append(f"\n用户消息:\n{content}")
+    
+    # 添加本地历史（保持向后兼容）
+    memories = get_user_memories(user_id, limit=5) if user_id else []
     if memories:
-        prompt_parts.append("用户历史消息：")
-        for m in memories:
-            prompt_parts.append(f"- {m['content']} ({m['timestamp']})")
-    prompt_parts.append("\n只需返回 JSON: {\"reply\": <text>}，不要包含其它内容。")
+        prompt_parts.append("最近消息摘要：")
+        for m in memories[:3]:  # 只取最近 3 条本地消息
+            prompt_parts.append(f"- {m['content']}")
+    
+    prompt_parts.append("\n请返回 JSON: {\"reply\": <回复文本>}，不要包含其它内容。")
     prompt = "\n".join(prompt_parts)
 
     try:
+        # 4. 调用 LLM 获取回复
         raw = _call_model(prompt)
         if raw is None or not str(raw).strip():
             logger.warning("Agent: model returned empty response for prompt")

@@ -6,7 +6,7 @@ Supports mini-commands:
 - /memories                            -> list sender's memories
 - /help /ping /time                    -> basic utility
 
-On ordinary messages, the server forwards the message + recent memories to the `agent` which returns
+On ordinary messages, the server forwards the message + Mem0 memories to the `agent` which returns
 a JSON-style response {"reply": <text>, optional "save_memory": {...}}.
 Replies to incoming messages will @ the sender when sender id is available.
 """
@@ -17,6 +17,7 @@ import logging
 from flask import Flask, request, jsonify
 
 from . import sender, agent, memory, config, scheduler
+from .mem0_manager import init_mem0
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -25,8 +26,11 @@ app = Flask(__name__)
 
 
 def init_app(start_scheduler: bool = True):
-    """Initialize DB and optionally start the background scheduler."""
+    """Initialize DB, Mem0, and optionally start the background scheduler."""
     memory.init_db()
+    # Initialize Mem0 memory layer
+    if not init_mem0():
+        logger.warning("Mem0 initialization failed, will continue with local memory only")
     if start_scheduler:
         scheduler.start()
 
