@@ -1,18 +1,54 @@
 version: '3.8'
+
 services:
   dingbot:
-    build: ./dingbot
+    build:
+      context: ./
+      dockerfile: ./dingbot/Dockerfile
+    container_name: dinghook-mem0-app
     ports:
       - "8080:8080"
     environment:
+      # DingTalk Configuration
       - ACCESS_TOKEN=${ACCESS_TOKEN}
       - SECRET=${SECRET}
-      # optional Gemini settings
-      - GEMINI_API_KEY=${GEMINI_API_KEY}
-      - GEMINI_API_URL=${GEMINI_API_URL}
+      
+      # OpenAI Compatible API Configuration
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_API_BASE=${OPENAI_API_BASE:-https://api.openai.com/v1}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4-turbo}
+      - OPENAI_REQUEST_TIMEOUT=${OPENAI_REQUEST_TIMEOUT:-90}
+      
+      # Data Storage
       - DATABASE_PATH=/data/dingbot_memory.db
+      
+      # Flask Settings
+      - FLASK_ENV=${FLASK_ENV:-production}
+      - PYTHONUNBUFFERED=1
+    
     volumes:
       - dingbot_data:/data
+    
+    # Restart policy
+    restart: unless-stopped
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 1G
+        reservations:
+          cpus: '1'
+          memory: 512M
+    
+    # Logging
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   dingbot_data:
+    driver: local

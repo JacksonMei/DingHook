@@ -1,0 +1,12 @@
+{
+  "alice_mem0_test": [
+    {
+      "fact": "{'reply': '抱歉，调用 LLM 失败。'}"
+    }
+  ],
+  "test_user_001": [
+    {
+      "fact": "{'reply': '抱歉，调用 LLM 失败。'}"
+    }
+  ]
+}
