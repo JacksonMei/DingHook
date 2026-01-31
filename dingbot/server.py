@@ -46,6 +46,12 @@ def health_check():
     return jsonify({"status": "ok", "message": "DingBot Server is running"})
 
 
+@app.route("/health", methods=["GET"])
+def health():
+    """Health check endpoint for container health probes."""
+    return jsonify({"status": "ok", "message": "DingBot Server is healthy"}), 200
+
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:

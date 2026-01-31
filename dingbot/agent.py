@@ -234,7 +234,7 @@ def extract_facts_for_user(user_id: str, max_messages: int = 50) -> List[Dict[st
         prompt_parts.append(f"- {m.get('content')}")
     prompt = "\n".join(prompt_parts)
     try:
-        raw = _call_model(prompt, timeout=10)
+        raw = _call_model(prompt, timeout=config.OPENAI_REQUEST_TIMEOUT)
         if not raw or not str(raw).strip():
             return []
         raw_s = str(raw).strip()
@@ -324,7 +324,7 @@ def generate_push_from_facts(user_id: str, facts: List[Dict[str, Any]]) -> str:
     facts_text = "\n".join([f"- {f.get('fact')}" for f in facts])
     prompt = f"为用户写一段友好的、简短的推送消息，基于以下事实（不要@用户，输出仅为消息文本）：\n{facts_text}\n请仅输出最终消息。"
     try:
-        raw = _call_model(prompt, timeout=8)
+        raw = _call_model(prompt, timeout=config.OPENAI_REQUEST_TIMEOUT)
         if not raw or not str(raw).strip():
             return "提醒: 保持关注，今天也要注意身体哦。"
         try:
